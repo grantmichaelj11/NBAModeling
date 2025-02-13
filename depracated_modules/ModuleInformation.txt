@@ -1,0 +1,8 @@
+[combine_duplicates] - My scraper was having trouble with text encoding and certain characters made it register as a new player 
+when it was not.
+
+[sql_database_generation] - Creates a MySQL DB from scratch with the required tables
+
+[sql_migration] - Transfer data from SQLite DB to MySQL DB
+
+[sql_controller_depracated] - SQLite DB controller
