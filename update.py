@@ -21,9 +21,10 @@ def run(year, month, day, update_seasons=True, start_year=2024, end_year=2025, d
     scrape_stats(year, month, day)
 
 
-for i in range(13,32):
-    run(2024, 12, i, update_seasons=False)
-run(2025, "01", day=None, update_seasons=False)
+if __name__ == "__main__":
+    for i in range(13,32):
+        run(2024, 12, i, update_seasons=False)
+    run(2025, "01", day=None, update_seasons=False)
         
         
         
