@@ -1,59 +1,133 @@
-import db_connection as connect
+"""Data-integrity checks for the NBA database, plus unit tests for the helpers.
+
+The integrity tests need a reachable MySQL server and are skipped when there
+isn't one. The helper tests use small in-memory data and always run.
+Nothing here touches the database at import time, so collection never fails.
+"""
 import numpy as np
+import pytest
+from mysql.connector.errors import InterfaceError
 
-def acquire_all_boxscores(database='NBA'):
+import db_connection as connect
 
+DATABASE = "NBA"
+
+
+# --------------------------------------------------------------------------
+# Database access
+# --------------------------------------------------------------------------
+
+def _fetch_all(query, database=DATABASE):
     with connect.connect_to_database(database) as conn:
-
         cursor = conn.cursor()
+        try:
+            cursor.execute(query)
+            return cursor.fetchall()
+        finally:
+            cursor.close()
 
-        sql_statement = ''' SELECT * FROM boxscores'''
-        cursor.execute(sql_statement)
-        result = cursor.fetchall()
 
-        return result
-    
-def acquire_all_games_team(database='NBA'):
+def acquire_all_boxscores(database=DATABASE):
+    return _fetch_all("SELECT * FROM boxscores", database)
 
-    with connect.connect_to_database(database) as conn:
 
-        cursor = conn.cursor()
+def acquire_all_games_team(database=DATABASE):
+    return _fetch_all("SELECT boxscore FROM team_stats", database)
 
-        sql_statement = ''' SELECT boxscore FROM team_stats'''
-        cursor.execute(sql_statement)
-        result = cursor.fetchall()
 
-        return result
-    
+# --------------------------------------------------------------------------
+# Pure helpers (no database)
+# --------------------------------------------------------------------------
+
+def create_boxscore_array(rows):
+    """First column of each row as a numpy array (works for int or str ids)."""
+    return np.array([row[0] for row in rows])
+
+
+def team_stats_without_two_rows(team_boxscores):
+    """Boxscore ids that don't appear exactly twice (one row per team)."""
+    ids, counts = np.unique(team_boxscores, return_counts=True)
+    return ids[counts != 2]
+
+
 def ensure_duplicates_for_all_team_stats(team_boxscores):
-    #This will ensure that all team stats have both teams who played in the game
-    unique_elements, counts = np.unique(team_boxscores, return_counts=True)
-    return np.all(counts == 2)
+    """True if every game has team stats for both teams."""
+    return team_stats_without_two_rows(team_boxscores).size == 0
+
 
 def find_boxscores_not_in_stats(boxscores, stats):
+    """Boxscore ids with no matching team-stat rows."""
+    return np.setdiff1d(boxscores, np.unique(stats))
 
-    unique_team_stats = np.unique(stats)
-    
-    return np.setdiff1d(boxscores, unique_team_stats)
 
-def create_boxscore_array(boxscores):
+# --------------------------------------------------------------------------
+# Fixtures: load once per session, skip cleanly if MySQL is unreachable
+# --------------------------------------------------------------------------
 
-    boxscore_ids = np.zeros(len(boxscores))
-    for i in range(len(boxscores)):
-        boxscore_ids[i] = boxscores[i][0]
+def _load_ids(loader):
+    try:
+        return create_boxscore_array(loader())
+    except InterfaceError as e:
+        pytest.skip(f"MySQL not reachable: {e}")
 
-    return boxscore_ids
 
-boxscores = create_boxscore_array(acquire_all_boxscores())
-team_stats = create_boxscore_array(acquire_all_games_team())
+@pytest.fixture(scope="session")
+def boxscores():
+    return _load_ids(acquire_all_boxscores)
 
-if ensure_duplicates_for_all_team_stats(team_stats):
-    print("ALL TEAM STATS APPEAR")
-else:
-    print("MISSING TEAM STATISTICS")
 
-if len(find_boxscores_not_in_stats(boxscores, team_stats)) == 0:
-    print('ALL TEAM GAMES ACCOUNTED FOR')
-else:
-    print("MISSING GAMES")
+@pytest.fixture(scope="session")
+def team_stats():
+    return _load_ids(acquire_all_games_team)
 
+
+# --------------------------------------------------------------------------
+# Integrity tests (need the real database)
+# --------------------------------------------------------------------------
+
+def test_every_game_has_two_team_stat_rows(team_stats):
+    bad = team_stats_without_two_rows(team_stats)
+    assert bad.size == 0, (
+        f"{bad.size} games don't have exactly two team-stat rows, e.g. {bad[:20].tolist()}"
+    )
+
+
+def test_every_boxscore_has_team_stats(boxscores, team_stats):
+    missing = find_boxscores_not_in_stats(boxscores, team_stats)
+    assert missing.size == 0, (
+        f"{missing.size} boxscores have no team stats, e.g. {missing[:20].tolist()}"
+    )
+
+
+# --------------------------------------------------------------------------
+# Unit tests for the helpers (always run)
+# --------------------------------------------------------------------------
+
+def test_create_boxscore_array_takes_first_column():
+    rows = [(101, "a", 3), (102, "b", 4)]
+    assert create_boxscore_array(rows).tolist() == [101, 102]
+
+
+def test_create_boxscore_array_handles_string_ids():
+    rows = [("202412010BOS",), ("202412010LAL",)]
+    assert create_boxscore_array(rows).tolist() == ["202412010BOS", "202412010LAL"]
+
+
+def test_create_boxscore_array_empty():
+    assert create_boxscore_array([]).size == 0
+
+
+def test_duplicate_check_passes_when_every_game_has_both_teams():
+    assert ensure_duplicates_for_all_team_stats(np.array([1, 1, 2, 2]))
+
+
+def test_duplicate_check_flags_missing_and_extra_rows():
+    ids = np.array([1, 1, 2, 3, 3, 3])
+    assert not ensure_duplicates_for_all_team_stats(ids)
+    assert team_stats_without_two_rows(ids).tolist() == [2, 3]
+
+
+def test_find_boxscores_not_in_stats():
+    boxscores = np.array([1, 2, 3])
+    stats = np.array([1, 1, 3, 3])
+    assert find_boxscores_not_in_stats(boxscores, stats).tolist() == [2]
